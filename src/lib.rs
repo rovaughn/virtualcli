@@ -1,15 +1,63 @@
+use std::io::Write;
 
+// TODO: Probably better to replace the pub fields with a public function
+//       interface.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct State {
-    width: usize,
-    height: usize,
-    cells: Vec<Vec<char>>,
-    cursor_row: usize,
-    cursor_col: usize,
+    need_clear: bool,
+    pub cols: usize,
+    pub rows: usize,
+    pub cells: Vec<Vec<char>>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+}
+
+fn repeat_vec<T>(value: T, n: usize) -> Vec<T>
+where T: Clone {
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n {
+        v.push(value.clone());
+    }
+    v
+}
+
+impl State {
+    pub fn write(&mut self, row: usize, col: usize, s: &str) {
+        let mut i = 0;
+        for c in s.chars() {
+            self.cells[row][col+i] = c;
+            i += 1;
+        }
+    }
+
+    pub fn new_blank(rows: usize, cols: usize) -> State {
+        State {
+            need_clear: false,
+            rows: rows,
+            cols: cols,
+            cells: repeat_vec(repeat_vec(' ', cols), rows),
+            cursor_row: 1,
+            cursor_col: 1,
+        }
+    }
+
+    pub fn new_real() -> State {
+        let (rows, cols) = (30, 30);
+
+        State {
+            need_clear: true,
+            rows: rows,
+            cols: cols,
+            cells: repeat_vec(repeat_vec('\0', cols), rows),
+            cursor_row: 1,
+            cursor_col: 1,
+        }
+    }
 }
 
 #[derive(Debug)]
 enum Op {
+    EraseEntireDisplay,
     Resize(usize, usize),
     Put(char),
     CursorPosition(usize, usize),
@@ -17,14 +65,16 @@ enum Op {
 
 type Oplist = Vec<Op>;
 
-fn code(ops: Oplist) -> String {
-    let mut res = String::new();
+fn code(ops: Oplist) -> Vec<u8> {
+    let mut res = Vec::new();
 
     for op in ops {
-        res.push_str(&match op {
-            Op::Resize(_w, _h) => String::new(),
-            Op::Put(c) => format!("{}", c),
-            Op::CursorPosition(row, col) => format!("\x1b[{};{}H", row, col),
+        res.extend(match op {
+            Op::EraseEntireDisplay => String::from("\x1b[2J").into_bytes(),
+            Op::Resize(_w, _h) => String::new().into_bytes(),
+            Op::Put(c) => format!("{}", c).into_bytes(),
+            Op::CursorPosition(row, col) =>
+                format!("\x1b[{};{}H", row, col).into_bytes(),
         });
     }
 
@@ -39,14 +89,19 @@ fn spill(old: &State, new: &State) -> Oplist {
     let mut cursor_col = old.cursor_col;
     let mut ops = Vec::new();
 
-    if new.width != old.width || new.height != old.height {
-        ops.push(Op::Resize(new.width, new.height))
+    if old.need_clear {
+        ops.push(Op::EraseEntireDisplay);
+        ops.push(Op::CursorPosition(1, 1));
     }
 
-    for row in 1..new.height+1 {
-        for col in 1..new.width+1 {
+    if new.cols != old.cols || new.rows != old.rows {
+        ops.push(Op::Resize(new.cols, new.rows))
+    }
+
+    for row in 1..new.rows+1 {
+        for col in 1..new.cols+1 {
             let old_cell =
-                if row <= old.height && col <= old.width {
+                if row <= old.rows && col <= old.cols {
                     old.cells[row - 1][col - 1]
                 } else {
                     ' '
@@ -63,8 +118,8 @@ fn spill(old: &State, new: &State) -> Oplist {
 
                 ops.push(Op::Put(new.cells[row - 1][col - 1]));
                 cursor_col += 1;
-                if cursor_col >= new.width {
-                    cursor_col -= new.width;
+                if cursor_col >= new.cols {
+                    cursor_col -= new.cols;
                     cursor_row += 1;
                 }
             }
@@ -78,8 +133,11 @@ fn spill(old: &State, new: &State) -> Oplist {
     ops
 }
 
-pub fn spill_code(old: &State, new: &State) -> String {
-    code(spill(old, new))
+pub fn flush(real: &mut State, fake: State) -> std::io::Result<usize> {
+    let n = std::io::stdout().write(code(spill(real, &fake)).as_slice())?;
+    std::io::stdout().flush()?;
+    *real = fake;
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -108,13 +166,13 @@ mod tests {
                         }
                     }
 
-                    s.width = w;
-                    s.height = h;
+                    s.cols = w;
+                    s.rows = h;
                 },
                 Op::Put(c) => {
                     s.cells[s.cursor_row - 1][s.cursor_col - 1] = c;
                     s.cursor_col += 1;
-                    if s.cursor_col > s.width {
+                    if s.cursor_col > s.cols {
                         s.cursor_col = 1;
                         s.cursor_row += 1;
                     }
@@ -139,17 +197,18 @@ mod tests {
     #[test]
     fn it_works() {
         assert_consistency(State {
-            width: 10,
-            height: 10,
+            cols: 10,
+            rows: 10,
             cells: vec![vec![' '; 10]; 10],
             cursor_row: 1,
             cursor_col: 1,
         }, State {
-            width: 8,
-            height: 10,
+            cols: 8,
+            rows: 10,
             cells: vec![vec![' '; 8]; 10],
             cursor_row: 5,
             cursor_col: 3,
         });
     }
 }
+
