@@ -1,14 +1,132 @@
+extern crate libc;
 use std::io::Write;
 use std::thread;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc;
 use std::mem::swap;
+use std::io::Read;
 
-pub struct Screen<T> where T: Send {
-    tx: Sender<ScreenCommand<T>>,
+pub struct Readkey {
+    saved_termios: libc::termios,
+    rx: mpsc::Receiver<Key>,
 }
 
-// TODO: Probably better to replace the pub fields with a public function
-//       interface.
+use std::ffi::CString;
+
+fn errno_message() -> String {
+    unsafe {
+        let errno = libc::__errno_location();
+        let mut s = [0; 64];
+        if libc::strerror_r(*errno, s.as_mut_ptr(), s.len()) != 0 {
+            return String::from("strerror_r failed");
+        }
+        CString::from_raw(s.as_mut_ptr()).into_string().unwrap_or(String::from("could not convert strerror_r to string"))
+    }
+}
+
+fn tcgetattr(fd: libc::c_int) -> Result<libc::termios, String> {
+    let mut work = libc::termios {
+        c_iflag: 0, c_oflag: 0, c_cflag: 0, c_lflag: 0, c_line: 0,
+        c_cc: [0; 32],
+        c_ispeed: 0, c_ospeed: 0,
+    };
+
+    unsafe {
+        if libc::tcgetattr(fd, &mut work) == 0 {
+            Ok(work)
+        } else {
+            Err(errno_message())
+        }
+    }
+}
+
+fn tcsetattr(fd: libc::c_int, optional_actions: libc::c_int, mut termios: libc::termios) -> Result<(), String> {
+    unsafe {
+        if libc::tcsetattr(fd, optional_actions, &mut termios) == 0 {
+            Ok(())
+        } else {
+            Err(errno_message())
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum Key {
+    Chr(char),
+    Del, End, Up, Down, Right, Left, Home,
+}
+
+impl Readkey {
+    pub fn new() -> Result<Readkey, String> {
+        let mut work = tcgetattr(libc::STDIN_FILENO)?;
+        let saved_termios = work;
+
+        work.c_lflag &= !libc::ECHO & !libc::ICANON;
+        work.c_cc[libc::VMIN] = 0;
+        work.c_cc[libc::VTIME] = 0;
+
+        tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, work)?;
+
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = Vec::new();
+            let mut readbuf = [0];
+
+            loop {
+                match stdin.read(&mut readbuf) {
+                Err(err) => panic!("{}", err),
+                Ok(0)    => continue,
+                Ok(1)    => buf.push(readbuf[0]),
+                Ok(_)    => panic!("impossible"),
+                }
+
+                if buf.len() == 3 && buf[0] == ('\x1b' as u8) && buf[1] == ('[' as u8) {
+                    tx.send(match buf[2] as char {
+                    '3' => Key::Del,
+                    '4' => Key::End,
+                    'A' => Key::Up,
+                    'B' => Key::Down,
+                    'C' => Key::Right,
+                    'D' => Key::Left,
+                    'H' => Key::Home,
+                    _   => { panic!("unknown combination \\[[\\x{:X}", buf[2]); },
+                    }).unwrap();
+                    buf.clear();
+                } else if buf.len() == 1 && buf[0] as char == '\x1b' || buf.len() == 2 && buf[0] as char == '\x1b' && buf[1] as char == '[' {
+                    // wait
+                } else {
+                    for c in &buf {
+                        tx.send(Key::Chr(*c as char)).unwrap();
+                    }
+                    buf.clear();
+                }
+            }
+        });
+
+        Ok(Readkey {
+            saved_termios: saved_termios,
+            rx: rx,
+        })
+    }
+
+    pub fn receiver(&self) -> &mpsc::Receiver<Key> {
+        &self.rx
+    }
+}
+
+impl Drop for Readkey {
+    fn drop(&mut self) {
+        tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, self.saved_termios).unwrap();
+    }
+}
+
+pub struct Screen<T> where T: Send {
+    tx: mpsc::SyncSender<ScreenCommand<T>>,
+}
+
+unsafe impl<T> Sync for Screen<T> where T: Send {}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct State {
     cols: usize,
@@ -26,7 +144,7 @@ enum ScreenCommand<T> where T: Send {
 
 impl<'a, T> Screen<T> where T: 'static + Send {
     pub fn new<F>(render: F, initial: T) -> Screen<T> where F: 'static + Fn(&T, &mut State) + Send {
-        let (tx, rx) = channel();
+        let (tx, rx) = mpsc::sync_channel(1);
 
         let screen = Screen {
             tx: tx,

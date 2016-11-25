@@ -6,6 +6,7 @@ authors = ["Alec NEwman <alecnwmn904@gmail.com>"]
 [dependencies]
 time = "*"
 rand = "*"
+libc = "*"
 
 [[bin]]
 name = "snake"
