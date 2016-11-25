@@ -80,7 +80,6 @@ impl<'a, T> Drop for Screen<T> where T: Send {
     }
 }
 
-
 fn repeat_vec<T>(value: T, n: usize) -> Vec<T>
 where T: Clone {
     let mut v = Vec::with_capacity(n);

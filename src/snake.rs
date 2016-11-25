@@ -4,9 +4,22 @@ use rand::distributions::{IndependentSample, Range};
 
 type Point = (usize, usize);
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
     North, South, East, West,
+}
+
+use Direction::*;
+
+impl Direction {
+    fn opposite(self) -> Self {
+        match self {
+            North => South,
+            South => North,
+            East  => West,
+            West  => East,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -23,16 +36,21 @@ enum State {
 impl State {
     fn new() -> State {
         State::Playing {
-            direction: Direction::South,
-            segments: vec![(5, 5)],
-            food: (2, 2),
+            direction: South,
+            segments: vec![(6, 5), (5, 5), (5, 4)],
+            food: (4, 5),
         }
     }
 }
 
+fn choose<'a, R, T>(rng: &mut R, choices: &'a [T]) -> &'a T where R: rand::Rng {
+    let samples = rand::sample(rng, choices, 1);
+    samples[0]
+}
+
 fn tick(state: State) -> State {
     match state {
-        State::Playing { direction, mut segments, food } => {
+        State::Playing { mut segments, direction, food } => {
             let mut rng = rand::thread_rng();
             let (head_row, head_col) = segments[0];
 
@@ -43,19 +61,23 @@ fn tick(state: State) -> State {
                 Direction::West  => (head_row, head_col - 1),
             };
 
-            for segment in &segments {
+            for segment in &segments[0..segments.len()-1] {
                 if new_head == *segment {
                     return State::Lose;
                 }
             }
 
-            let x = Range::new(0, 4).ind_sample(&mut rng);
-            let new_direction = match x {
-                0 => Direction::North,
-                1 => Direction::South,
-                2 => Direction::East,
-                3 => Direction::West,
-                _ => panic!("impossible"),
+            let new_direction = {
+                let mut dirs = vec![North, South, East, West];
+
+                for i in 0..dirs.len() {
+                    if dirs[i] == direction.opposite() {
+                        dirs.remove(i);
+                        break;
+                    }
+                }
+
+                rand::sample(&mut rng, dirs, 1)[0]
             };
 
             if new_head == food {
@@ -75,7 +97,9 @@ fn tick(state: State) -> State {
                     food: food,
                 }
             } else {
-                segments[0] = new_head;
+                segments.insert(0, new_head);
+                let i = segments.len() - 1;
+                segments.remove(i);
 
                 State::Playing {
                     direction: new_direction,
@@ -114,9 +138,33 @@ fn main() {
 
             screen.write(mid_row, mid_col, "You win!");
         },
-        &State::Playing { ref segments, food, ..  } => {
-            for &(row, col) in segments {
-                screen.put(row, col, '+');
+        &State::Playing { ref segments, direction, food, ..  } => {
+            let mut d = direction.clone();
+
+            for i in 0..segments.len()-1 {
+                let (y, x) = segments[i];
+                let (ny, nx) = segments[i + 1];
+
+                let nd =
+                         if y > ny { South }
+                    else if y < ny { North }
+                    else if x > nx { East  }
+                    else if x < nx { West  }
+                    else           { panic!("impossible") };
+
+                let c = match (d, nd) {
+                (Direction::East, Direction::East) | (Direction::West, Direction::West) => '═',
+                (Direction::North, Direction::North) | (Direction::South, Direction::South) => '║',
+                (Direction::East, Direction::North) | (Direction::South, Direction::West)  => '╔',
+                (Direction::West, Direction::North) | (Direction::South, Direction::East) => '╗',
+                (Direction::North, Direction::West) | (Direction::East, Direction::South) => '╚',
+                (Direction::North, Direction::East) | (Direction::West, Direction::South) => '╝',
+                _ => panic!("impossible direction pair {:?}", (d, nd)),
+                };
+
+                screen.put(y, x, c);
+
+                d = nd;
             }
 
             let (food_row, food_col) = food;
@@ -126,7 +174,7 @@ fn main() {
     }, State::new());
 
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(500));
         screen.modify_state(Box::new(|state| {
             tick(state)
         }));
